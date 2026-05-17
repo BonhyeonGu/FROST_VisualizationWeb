@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>FROST Sensor Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; background-color: #f0f2f5; margin: 20px; color: #333; }
+        
+        .grid-container { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); 
+            gap: 15px; 
+            align-items: stretch;
+        }
+        
+        .sensor-card { 
+            background: white; border-radius: 12px; padding: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+            cursor: pointer; transition: all 0.2s ease; border-top: 5px solid #2ecc71;
+            display: flex; flex-direction: column; gap: 10px;
+            height: 100%; box-sizing: border-box;
+        }
+        .sensor-card:hover { transform: translateY(-4px); box-shadow: 0 6px 15px rgba(0,0,0,0.12); }
+        
+        .sensor-card.timeout { border-top-color: #e74c3c; background-color: #fff9f9; }
+        .sensor-card.error { border-top-color: #95a5a6; background-color: #f8f9fa; }
+        
+        @keyframes flashUpdate { 0% { background-color: #d4f8e2; } 100% { background-color: white; } }
+        .sensor-card.flash { animation: flashUpdate 1s ease-out; }
+
+        /* 💡 1. 헤더 영역이 남는 공간을 모두 흡수하도록 설정 */
+        .card-header { 
+            display: flex; flex-direction: column; align-items: flex-start; gap: 8px; 
+            flex-grow: 1; /* 이 속성 덕분에 하단 영역들이 바닥으로 완벽하게 정렬됩니다 */
+            margin-bottom: 5px;
+        }
+        
+        /* 💡 2. 이름: 무조건 3줄(3.9em) 공간 차지, 넘치면 ... 처리 */
+        .card-title { 
+            font-size: 1.15em; font-weight: bold; color: #1a1a1a; 
+            line-height: 1.3; word-break: keep-all; overflow-wrap: break-word;
+            height: 3.9em; 
+            width: 100%;
+            display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis;
+        }
+
+        /* 💡 3. 위치 배지: 무조건 2줄(2.6em) 공간 차지, 세로 중앙 정렬 */
+        .location-badge { 
+            font-size: 0.75em; background: #e8f0fe; color: #1a73e8; 
+            padding: 0 8px; border-radius: 5px; 
+            line-height: 1.3; word-break: keep-all; 
+            height: 2.6em; /* 2줄 높이 고정 */
+            width: 100%; box-sizing: border-box;
+            display: flex; align-items: center; /* 텍스트가 1줄이어도 배지 중앙에 예쁘게 위치함 */
+            overflow: hidden; text-overflow: ellipsis;
+        }
+        
+        .status-zone { background: #f8f9fa; padding: 10px; border-radius: 8px; font-size: 0.85em; }
+        .info-line { display: flex; justify-content: space-between; margin-bottom: 4px; }
+        .age-label { color: #666; }
+        .timer-val { font-weight: bold; font-size: 1.05em; }
+
+        .preview-zone { 
+            font-size: 1.05em; font-weight: bold; color: #2c3e50; text-align: center; 
+            padding: 10px 0; border-top: 1px solid #eee; border-bottom: 1px solid #eee;
+        }
+        
+        .footer-meta { font-size: 0.75em; color: #999; display: flex; justify-content: space-between; }
+
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); justify-content: center; align-items: center; z-index: 1000; }
+        .modal-content { background: white; padding: 25px; border-radius: 12px; width: 90%; max-width: 600px; position: relative; }
+        .close-btn { position: absolute; top: 15px; right: 20px; font-size: 1.5em; cursor: pointer; color: #999; }
+        .close-btn:hover { color: #333; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { text-align: left; padding: 10px; border-bottom: 1px solid #eee; font-size: 0.9em; }
+        th { background: #f8f9fa; color: #666; }
+    </style>
+</head>
+<body>
+
+    <h2 style="margin-bottom: 20px;">실시간 센서 가시화 대시보드</h2>
+    
+    <div id="loading-message" style="text-align: center; padding: 100px; color: #666;">
+        <h3>데이터를 동기화하고 있습니다...</h3>
+    </div>
+
+    <div class="grid-container" id="sensor-grid"></div>
+
+    <div class="modal-overlay" id="sensor-modal" onclick="closeModal()">
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <span class="close-btn" onclick="closeModal()">&times;</span>
+            <div style="background:#f1f3f4; padding:15px; border-radius:10px; margin-bottom:15px;">
+                <h3 id="modal-title" style="margin:0; word-break: keep-all;"></h3>
+                <p id="modal-loc" style="margin:5px 0 0 0; font-size:0.9em; color:#666; word-break: keep-all;"></p>
+            </div>
+            <div id="modal-notes"></div>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        const sensorState = {};
+
+        function formatTime(s) {
+            const absS = Math.abs(s);
+            if (absS < 60) return `${absS}초`;
+            return `${Math.floor(absS/60)}분 ${absS%60}초`;
+        }
+
+        setInterval(() => {
+            for (const [id, info] of Object.entries(sensorState)) {
+                const timerEl = document.getElementById(`timer-${id}`);
+                const ageEl = document.getElementById(`age-${id}`);
+                const card = document.getElementById(`card-${id}`);
+                if (!timerEl || !card || info.last_update === "No Data") continue;
+
+                info.local_remaining -= 1;
+                info.local_age += 1;
+
+                ageEl.innerText = formatTime(info.local_age);
+                
+                if (info.local_remaining > 0) {
+                    timerEl.innerText = `- ${formatTime(info.local_remaining)}`;
+                    timerEl.style.color = "#2ecc71"; 
+                    card.classList.remove('timeout');
+                } else {
+                    timerEl.innerText = `+ ${formatTime(info.local_remaining)}`;
+                    
+                    if (info.local_remaining <= -info.timeout_limit) {
+                        timerEl.style.color = "#e74c3c"; 
+                        card.classList.add('timeout');
+                    } else {
+                        timerEl.style.color = "#f39c12"; 
+                        card.classList.remove('timeout');
+                    }
+                }
+            }
+        }, 1000);
+
+        socket.on('sensor_update', (data) => {
+            document.getElementById('loading-message').style.display = 'none';
+            for (const [id, info] of Object.entries(data)) {
+                const isNew = !sensorState[id] || sensorState[id].last_update !== info.last_update;
+                
+                info.local_remaining = info.remaining_seconds;
+                info.local_age = info.data_age;
+                sensorState[id] = info;
+
+                let card = document.getElementById(`card-${id}`);
+                if (!card) {
+                    card = document.createElement('div');
+                    card.id = `card-${id}`;
+                    card.className = 'sensor-card';
+                    card.onclick = () => openModal(id);
+                    document.getElementById('sensor-grid').appendChild(card);
+                }
+
+                if (isNew) {
+                    card.innerHTML = `
+                        <div class="card-header">
+                            <div class="card-title">${info.alias}</div>
+                            <div class="location-badge">📍 ${info.csv_location}</div>
+                        </div>
+                        <div class="status-zone">
+                            <div class="info-line">
+                                <span class="age-label">경과 시간:</span>
+                                <span id="age-${id}">${formatTime(info.data_age)}</span>
+                            </div>
+                            <div class="info-line">
+                                <span class="age-label">주기 오프셋:</span>
+                                <span class="timer-val" id="timer-${id}">-</span>
+                            </div>
+                        </div>
+                        <div class="preview-zone">${info.preview.join(' / ') || '연결 대기'}</div>
+                        <div class="footer-meta">
+                            <span>🏢 ${info.provider}</span>
+                            <span>${new Date(info.last_update).toLocaleTimeString()}</span>
+                        </div>
+                    `;
+
+                    card.classList.remove('flash'); 
+                    void card.offsetWidth; 
+                    card.classList.add('flash');
+                }
+                
+                if (info.status === 'timeout') {
+                    card.classList.add('timeout');
+                } else if (info.status === 'error') {
+                    card.classList.add('error');
+                } else {
+                    card.classList.remove('timeout', 'error');
+                }
+            }
+        });
+
+        function openModal(id) {
+            const info = sensorState[id];
+            document.getElementById('modal-title').innerText = info.frost_name;
+            document.getElementById('modal-loc').innerText = `📍 ${info.frost_location}`;
+            document.getElementById('modal-notes').innerHTML = info.notes ? `<div style="padding:10px; background:#fff3cd; border-radius:8px; font-size:0.9em; margin-bottom:15px; word-break: keep-all;"><b>💡 유의사항:</b> ${info.notes}</div>` : "";
+            document.getElementById('modal-body').innerHTML = `<table><thead><tr><th>속성</th><th>값</th><th>단위</th></tr></thead><tbody>${info.details.map(d=>`<tr><td>${d.property}</td><td><b>${d.result}</b></td><td>${d.unit}</td></tr>`).join('')}</tbody></table>`;
+            document.getElementById('sensor-modal').style.display = 'flex';
+        }
+        function closeModal() { document.getElementById('sensor-modal').style.display = 'none'; }
+    </script>
+</body>
+</html>
