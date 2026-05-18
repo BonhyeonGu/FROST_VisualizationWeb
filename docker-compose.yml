@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  frost-dashboard:
+    build: .
+    container_name: frost_dashboard
+    ports:
+      - "8090:5000"
+    volumes:
+      # 컨테이너를 재시작하지 않아도 파일 수정 사항을 반영하기 위해 볼륨 마운트
+      - ./config.json:/app/config.json
+      - ./sensors.csv:/app/sensors.csv
+      # 템플릿(HTML)도 바로바로 수정하고 싶다면 아래 주석을 해제하세요.
+      # - ./templates:/app/templates
+    environment:
+      - TZ=Asia/Seoul
+    restart: unless-stopped # 서버가 재부팅되어도 자동으로 실행되도록 설정
